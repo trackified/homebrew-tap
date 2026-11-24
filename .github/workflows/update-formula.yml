@@ -1,0 +1,58 @@
+# Keeps Formula/trackified.rb on the latest trackified-cli release. Runs here with this repo's own
+# token, so the CLI repo holds no credential for the tap. Every archive's GitHub build provenance
+# is verified before its checksum goes into the formula.
+name: Update formula
+
+on:
+  schedule:
+    - cron: "17 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: update-formula
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      attestations: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Latest release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag=$(gh release view -R trackified/trackified-cli --json tagName --jq .tagName)
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          current=$(sed -n 's/^  version "\(.*\)"$/\1/p' Formula/trackified.rb 2>/dev/null || true)
+          if [ "${tag#v}" = "$current" ]; then echo "up_to_date=true" >> "$GITHUB_OUTPUT"; fi
+      - name: Download and verify archives
+        if: steps.release.outputs.up_to_date != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          mkdir dl && cd dl
+          gh release download "v$VERSION" -R trackified/trackified-cli -p checksums.txt -p "trackified_${VERSION}_darwin_*.tar.gz" -p "trackified_${VERSION}_linux_*.tar.gz"
+          sha256sum --check --ignore-missing checksums.txt
+          for f in trackified_*.tar.gz; do
+            gh attestation verify "$f" --repo trackified/trackified-cli --signer-workflow trackified/trackified-cli/.github/workflows/release.yml
+          done
+      - name: Write formula
+        if: steps.release.outputs.up_to_date != 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          python3 scripts/render_formula.py "$VERSION" dl/checksums.txt > Formula/trackified.rb
+          rm -rf dl
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/trackified.rb
+          git commit -m "trackified $VERSION"
+          git push
